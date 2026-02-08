@@ -1,0 +1,1015 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>0PLAYER</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #1a1a1a; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; color: #eee; touch-action: none; }
+#toolbar {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+  background: #2a2a2a; border-bottom: 1px solid #444;
+  display: flex; align-items: center; gap: 12px; padding: 8px 16px;
+  flex-wrap: wrap;
+}
+#toolbar label { font-size: 12px; color: #aaa; }
+#toolbar input[type="text"] {
+  background: #333; border: 1px solid #555; color: #eee;
+  padding: 4px 8px; border-radius: 4px; width: 120px; font-size: 13px;
+}
+.color-btn {
+  width: 24px; height: 24px; border-radius: 50%; border: 2px solid transparent;
+  cursor: pointer; transition: border-color 0.15s;
+}
+.color-btn.active { border-color: #fff; }
+.color-btn.color-black { border-color: #666; }
+.color-btn.color-black.active { border-color: #fff; }
+.color-btn.color-white { border-color: #666; }
+.color-btn.color-white.active { border-color: #aaa; }
+.tool-btn {
+  background: #444; border: 1px solid #555; color: #ddd;
+  padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 13px;
+  transition: background 0.15s;
+}
+.tool-btn.active { background: #6a6aff; border-color: #8a8aff; color: #fff; }
+.tool-btn:hover { background: #555; }
+#penSize { width: 80px; accent-color: #6a6aff; }
+#sizeLabel { font-size: 12px; color: #aaa; min-width: 20px; }
+.sep { width: 1px; height: 24px; background: #444; }
+canvas { display: block; }
+#players {
+  position: fixed; bottom: 8px; left: 8px; z-index: 100;
+  display: flex; gap: 8px; flex-wrap: wrap;
+}
+.player-tag {
+  font-size: 11px; padding: 2px 8px; border-radius: 10px;
+  background: rgba(0,0,0,0.5); border: 1px solid;
+}
+#coords {
+  position: fixed; bottom: 8px; right: 8px; z-index: 100;
+  font-size: 11px; color: #888; background: rgba(0,0,0,0.5);
+  padding: 2px 8px; border-radius: 4px;
+}
+#textInput {
+  position: fixed; z-index: 200; display: none;
+  background: #333; border: 1px solid #6a6aff; color: #eee;
+  padding: 4px 8px; font-size: 16px; border-radius: 4px;
+  min-width: 100px; outline: none;
+}
+</style>
+</head>
+<body>
+<div id="toolbar">
+  <input type="text" id="nameInput" placeholder="Player">
+  <div class="sep"></div>
+  <div id="colorPicker" style="display:flex;gap:4px;"></div>
+  <div class="sep"></div>
+  <div id="tools" style="display:flex;gap:4px;"></div>
+  <div class="sep"></div>
+  <label>Size</label>
+  <input type="range" id="penSize" min="1" max="20" value="5">
+  <span id="sizeLabel">5</span>
+  <div class="sep"></div>
+  <button class="tool-btn" id="undoBtn">Undo</button>
+  <button class="tool-btn" id="redoBtn">Redo</button>
+  <div style="flex:1"></div>
+  <span id="versionLabel" style="font-size:11px;color:#666;"></span>
+  <div id="versionBanner" style="display:none;background:#ff8844;color:#000;padding:4px 12px;border-radius:4px;font-size:12px;cursor:pointer;font-weight:600;" onclick="location.reload()"></div>
+</div>
+<canvas id="canvas"></canvas>
+<input type="text" id="textInput">
+<div id="players"></div>
+<div id="coords"></div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script>
+const CELL = 69;
+const ZOOM_MIN = 0.1, ZOOM_MAX = 2, ZOOM_DEFAULT = 0.15;
+const MOVE_RADIUS = 30, DELETE_RADIUS = 20;
+const DRAG_THROTTLE = 100, CURSOR_THROTTLE = 50, VIEWPORT_THROTTLE = 100;
+const TEXT_SIZE = 35, FONT_FALLBACK = 16;
+const FILL_ALPHA = 0.3, CORNER_RADIUS = 8, OUTLINE_WIDTH = 2;
+const SIGNAL_RADIUS = CELL / 4;
+const COLORS = ['#ff4444','#ff8844','#ffdd44','#44ff44','#44ddff','#4488ff','#aa44ff','#ff44aa','#ffffff','#000000'];
+const TOOLS = ['Move','Pen','Text','Block','Tetramino','Signal','Delete'];
+const TOOL_LABELS = { Pen: 'Draw' };
+const TOOL_KEYS = { Move: 2, Pen: 1, Text: 0, Block: 0, Tetramino: 1, Signal: 0, Delete: 0 };
+
+const socket = io();
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const nameInput = document.getElementById('nameInput');
+const penSizeEl = document.getElementById('penSize');
+const sizeLabelEl = document.getElementById('sizeLabel');
+const textInputEl = document.getElementById('textInput');
+const coordsEl = document.getElementById('coords');
+const playersEl = document.getElementById('players');
+
+let myColor = localStorage.getItem('playerColor') || COLORS[Math.floor(Math.random() * COLORS.length)];
+let myTool = 'Move';
+let mySize = 5;
+let myName = localStorage.getItem('playerName') || 'Player' + Math.floor(Math.random() * 1000);
+nameInput.value = myName;
+
+let cam = JSON.parse(localStorage.getItem('cam')) || { x: 0, y: 0, zoom: ZOOM_DEFAULT };
+let annotations = [];
+let remotePlayers = {};
+let drawing = false;
+let currentStroke = null;
+let shapeStart = null;
+let spaceDown = false;
+let panning = false;
+let panStart = null;
+let highlightedId = null;
+let dragging = null;
+let dragSendTimer = null;
+let dragOffsets = {};
+let selectedIds = new Set();
+let img = new Image();
+let imgLoaded = false;
+
+img.onload = () => { imgLoaded = true; render(); };
+img.src = '/0PLAYER.png';
+
+function resizeCanvas() {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+  render();
+}
+window.addEventListener('resize', resizeCanvas);
+resizeCanvas();
+
+// Toolbar setup
+const colorPickerEl = document.getElementById('colorPicker');
+COLORS.forEach(c => {
+  const btn = document.createElement('div');
+  btn.className = 'color-btn' + (c === myColor ? ' active' : '') + (c === '#000000' ? ' color-black' : '') + (c === '#ffffff' ? ' color-white' : '');
+  btn.style.background = c;
+  btn.onclick = () => {
+    myColor = c;
+    colorPickerEl.querySelectorAll('.color-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    localStorage.setItem('playerColor', myColor);
+    socket.emit('player:update', { color: myColor });
+    updatePlayerList();
+  };
+  colorPickerEl.appendChild(btn);
+});
+
+const toolsEl = document.getElementById('tools');
+function selectTool(name) {
+  myTool = name;
+  selectedIds.clear();
+  toolsEl.querySelectorAll('.tool-btn').forEach(b => b.classList.toggle('active', b.dataset.tool === name));
+  render();
+}
+TOOLS.forEach(t => {
+  const btn = document.createElement('button');
+  btn.className = 'tool-btn' + (t === myTool ? ' active' : '');
+  btn.dataset.tool = t;
+  const label = TOOL_LABELS[t] || t;
+  const ki = TOOL_KEYS[t];
+  btn.innerHTML = label.slice(0, ki) + '<u>' + label[ki] + '</u>' + label.slice(ki + 1);
+  btn.onclick = () => selectTool(t);
+  toolsEl.appendChild(btn);
+});
+
+penSizeEl.oninput = () => { mySize = +penSizeEl.value; sizeLabelEl.textContent = mySize; };
+nameInput.oninput = () => { myName = nameInput.value || 'Player'; localStorage.setItem('playerName', myName); socket.emit('player:update', { name: myName }); updatePlayerList(); };
+document.getElementById('undoBtn').onclick = () => socket.emit('annotation:undo');
+document.getElementById('redoBtn').onclick = () => socket.emit('annotation:redo');
+
+// Coordinate transforms
+function screenToWorld(sx, sy) {
+  return { x: (sx - cam.x) / cam.zoom, y: (sy - cam.y) / cam.zoom };
+}
+function worldToScreen(wx, wy) {
+  return { x: wx * cam.zoom + cam.x, y: wy * cam.zoom + cam.y };
+}
+function clampCam() {
+  if (!imgLoaded) return;
+  const margin = Math.min(canvas.width, canvas.height) * 0.1;
+  cam.x = Math.max(-img.naturalWidth * cam.zoom + margin, Math.min(canvas.width - margin, cam.x));
+  cam.y = Math.max(-img.naturalHeight * cam.zoom + margin, Math.min(canvas.height - margin, cam.y));
+}
+
+// Input handling
+canvas.addEventListener('mousedown', (e) => {
+  if (e.button === 1 || (e.button === 0 && spaceDown)) {
+    panning = true;
+    panStart = { x: e.clientX - cam.x, y: e.clientY - cam.y };
+    canvas.style.cursor = 'grabbing';
+    e.preventDefault();
+    return;
+  }
+  if (e.button !== 0) return;
+  const w = screenToWorld(e.clientX, e.clientY);
+
+  if (myTool === 'Delete') {
+    if (highlightedId != null) socket.emit('annotation:remove', highlightedId);
+    highlightedId = null;
+    render();
+    return;
+  }
+  if (myTool === 'Move') {
+    const hit = findNearestAnnotation(w.x, w.y, MOVE_RADIUS / cam.zoom);
+    if (hit) {
+      if (e.metaKey || e.ctrlKey) {
+        if (selectedIds.has(hit.id)) selectedIds.delete(hit.id);
+        else selectedIds.add(hit.id);
+        render();
+        return;
+      }
+      if (!selectedIds.has(hit.id)) {
+        selectedIds.clear();
+        selectedIds.add(hit.id);
+      }
+      const allChildIds = [];
+      for (const sid of selectedIds) {
+        const sa = annotations.find(a => a.id === sid);
+        if (sa && (sa.type === 'block' || sa.type === 'tetramino')) allChildIds.push(...findOverlapping(sa));
+      }
+      dragging = { id: hit.id, ids: [...selectedIds], originX: w.x, originY: w.y, totalDx: 0, totalDy: 0, childIds: allChildIds };
+      canvas.style.cursor = 'grabbing';
+    } else {
+      selectedIds.clear();
+      panning = true;
+      panStart = { x: e.clientX - cam.x, y: e.clientY - cam.y };
+      canvas.style.cursor = 'grabbing';
+    }
+    render();
+    return;
+  }
+  if (myTool === 'Text') {
+    textInputEl.style.display = 'block';
+    textInputEl.style.left = e.clientX + 'px';
+    textInputEl.style.top = e.clientY + 'px';
+    textInputEl.style.color = myColor;
+    textInputEl.value = '';
+    setTimeout(() => textInputEl.focus(), 0);
+    const wx = w.x, wy = w.y;
+    textInputEl.onkeydown = (ev) => {
+      if (ev.key === 'Enter') {
+        const text = textInputEl.value.trim();
+        if (text) {
+          socket.emit('annotation:add', { type: 'text', x: wx, y: wy, text, color: myColor, size: TEXT_SIZE });
+        }
+        textInputEl.style.display = 'none';
+        textInputEl.onkeydown = null;
+      } else if (ev.key === 'Escape') {
+        textInputEl.style.display = 'none';
+        textInputEl.onkeydown = null;
+      }
+    };
+    return;
+  }
+  if (myTool === 'Pen') {
+    drawing = true;
+    currentStroke = { type: 'pen', points: [{ x: w.x, y: w.y }], color: myColor, size: mySize };
+    return;
+  }
+  if (myTool === 'Block') {
+    drawing = true;
+    const sx = Math.round(w.x / CELL) * CELL - Math.round(CELL / 2), sy = Math.round(w.y / CELL) * CELL - Math.round(CELL / 2);
+    currentStroke = { type: 'block', x1: sx, y1: sy, x2: sx + CELL, y2: sy + CELL, color: myColor, size: mySize };
+    return;
+  }
+  if (myTool === 'Tetramino') {
+    drawing = true;
+    const ox = Math.round(w.x / CELL) * CELL - Math.round(CELL / 2), oy = Math.round(w.y / CELL) * CELL - Math.round(CELL / 2);
+    currentStroke = { type: 'tetramino', x: ox, y: oy, cells: [{ ix: 0, iy: 0 }], color: myColor, size: mySize };
+    return;
+  }
+  if (myTool === 'Signal') {
+    socket.emit('annotation:add', { type: 'signal', x: w.x, y: w.y, on: true, color: myColor, size: mySize });
+    return;
+  }
+  // Shape tools
+  drawing = true;
+  shapeStart = { x: w.x, y: w.y };
+  currentStroke = { type: myTool.toLowerCase(), x1: w.x, y1: w.y, x2: w.x, y2: w.y, color: myColor, size: mySize };
+});
+
+canvas.addEventListener('mousemove', (e) => {
+  const w = screenToWorld(e.clientX, e.clientY);
+  coordsEl.textContent = `${Math.round(w.x)}, ${Math.round(w.y)} | ${Math.round(cam.zoom * 100)}%`;
+  emitCursor(w.x, w.y);
+
+  if (panning) {
+    cam.x = e.clientX - panStart.x;
+    cam.y = e.clientY - panStart.y;
+    emitViewport();
+    render();
+    return;
+  }
+  if ((myTool === 'Delete' || myTool === 'Move') && !drawing && !dragging) {
+    const hit = findNearestAnnotation(w.x, w.y, (myTool === 'Delete' ? DELETE_RADIUS : MOVE_RADIUS) / cam.zoom);
+    const newId = hit ? hit.id : null;
+    if (newId !== highlightedId) { highlightedId = newId; render(); }
+    canvas.style.cursor = newId ? 'pointer' : '';
+    return;
+  }
+  if (dragging) {
+    dragging.totalDx = w.x - dragging.originX;
+    dragging.totalDy = w.y - dragging.originY;
+    if (!dragSendTimer) {
+      dragSendTimer = setTimeout(() => {
+        dragSendTimer = null;
+        for (const did of (dragging.ids || [dragging.id])) {
+          socket.emit('annotation:dragging', { id: did, dx: dragging.totalDx, dy: dragging.totalDy, childIds: dragging.childIds });
+        }
+      }, DRAG_THROTTLE);
+    }
+    render();
+    return;
+  }
+  if (!drawing) return;
+  if (currentStroke.type === 'pen') {
+    currentStroke.points.push({ x: w.x, y: w.y });
+  } else if (currentStroke.type === 'block') {
+    const sx = currentStroke.x1, sy = currentStroke.y1;
+    const half = Math.round(CELL / 2);
+    let ex = Math.round(w.x / CELL) * CELL - half + CELL, ey = Math.round(w.y / CELL) * CELL - half + CELL;
+    if (ex <= sx) ex = sx + CELL;
+    if (ey <= sy) ey = sy + CELL;
+    currentStroke.x2 = ex;
+    currentStroke.y2 = ey;
+  } else if (currentStroke.type === 'tetramino') {
+    updateTetraminoCells(currentStroke, w);
+  } else {
+    currentStroke.x2 = w.x;
+    currentStroke.y2 = w.y;
+  }
+  render();
+});
+
+canvas.addEventListener('mouseup', (e) => {
+  if (panning) { panning = false; canvas.style.cursor = ''; return; }
+  if (dragging) {
+    if (dragSendTimer) { clearTimeout(dragSendTimer); dragSendTimer = null; }
+    if (dragging.totalDx || dragging.totalDy) {
+      for (const did of (dragging.ids || [dragging.id])) {
+        socket.emit('annotation:move', { id: did, dx: dragging.totalDx, dy: dragging.totalDy });
+      }
+      for (const cid of dragging.childIds) socket.emit('annotation:move', { id: cid, dx: dragging.totalDx, dy: dragging.totalDy });
+    } else {
+      const a = annotations.find(a => a.id === dragging.id);
+      if (a && a.type === 'signal') socket.emit('annotation:toggle', a.id);
+    }
+    for (const did of (dragging.ids || [dragging.id])) delete dragOffsets[did];
+    dragging = null;
+    canvas.style.cursor = '';
+    return;
+  }
+  if (!drawing) return;
+  drawing = false;
+  if (currentStroke.type === 'pen' && currentStroke.points.length < 2) return;
+  socket.emit('annotation:add', currentStroke);
+  currentStroke = null;
+  render();
+});
+
+canvas.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  const oldZoom = cam.zoom;
+  const isTrackpad = e.deltaMode === 0 && (Math.abs(e.deltaX) > 0 || !Number.isInteger(e.deltaY) || Math.abs(e.deltaY) < 50);
+  if (e.ctrlKey || e.metaKey) {
+    const factor = isTrackpad ? (1 - e.deltaY * 0.01) : (e.deltaY > 0 ? 0.9 : 1.1);
+    cam.zoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, cam.zoom * factor));
+  } else if (isTrackpad) {
+    cam.x -= e.deltaX;
+    cam.y -= e.deltaY;
+  }
+  if (cam.zoom !== oldZoom) {
+    cam.x = e.clientX - (e.clientX - cam.x) * (cam.zoom / oldZoom);
+    cam.y = e.clientY - (e.clientY - cam.y) * (cam.zoom / oldZoom);
+  }
+  emitViewport();
+  render();
+}, { passive: false });
+
+window.addEventListener('keydown', (e) => {
+  if (e.target === nameInput || e.target === textInputEl) return;
+  if (e.code === 'Space') { spaceDown = true; e.preventDefault(); }
+  if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'z') { socket.emit('annotation:redo'); e.preventDefault(); }
+  else if ((e.ctrlKey || e.metaKey) && e.key === 'z') { socket.emit('annotation:undo'); e.preventDefault(); }
+  else if (!e.ctrlKey && !e.metaKey) {
+    const toolKey = { v: 'Move', r: 'Pen', t: 'Text', b: 'Block', e: 'Tetramino', s: 'Signal', d: 'Delete' }[e.key.toLowerCase()];
+    if (toolKey) selectTool(toolKey);
+    else if (e.key >= '0' && e.key <= '9') {
+      const ci = e.key === '0' ? 9 : parseInt(e.key) - 1;
+      if (ci < COLORS.length) {
+        myColor = COLORS[ci];
+        colorPickerEl.querySelectorAll('.color-btn').forEach(b => b.classList.remove('active'));
+        colorPickerEl.children[ci].classList.add('active');
+        localStorage.setItem('playerColor', myColor);
+        socket.emit('player:update', { color: myColor });
+        updatePlayerList();
+      }
+    }
+    else if (e.key === 'Backspace' || e.key === 'Delete') { socket.emit('annotation:undo'); e.preventDefault(); }
+    else if (e.key === 'Escape') selectTool('Move');
+  }
+});
+window.addEventListener('keyup', (e) => {
+  if (e.code === 'Space') spaceDown = false;
+});
+
+canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
+// Touch support
+let touchState = { mode: null, lastDist: 0, lastMid: null };
+
+canvas.addEventListener('touchstart', (e) => {
+  e.preventDefault();
+  if (e.touches.length === 2) {
+    if (drawing) { drawing = false; currentStroke = null; }
+    touchState.mode = 'gesture';
+    const t = e.touches;
+    touchState.lastDist = Math.hypot(t[1].clientX - t[0].clientX, t[1].clientY - t[0].clientY);
+    touchState.lastMid = { x: (t[0].clientX + t[1].clientX) / 2, y: (t[0].clientY + t[1].clientY) / 2 };
+    return;
+  }
+  if (e.touches.length !== 1) return;
+  touchState.mode = 'draw';
+  const t = e.touches[0];
+  const w = screenToWorld(t.clientX, t.clientY);
+
+  if (myTool === 'Delete') {
+    const hit = findNearestAnnotation(w.x, w.y, DELETE_RADIUS / cam.zoom);
+    if (hit) socket.emit('annotation:remove', hit.id);
+    return;
+  }
+  if (myTool === 'Move') {
+    const hit = findNearestAnnotation(w.x, w.y, MOVE_RADIUS / cam.zoom);
+    if (hit) {
+      if (!selectedIds.has(hit.id)) {
+        selectedIds.clear();
+        selectedIds.add(hit.id);
+      }
+      const allChildIds = [];
+      for (const sid of selectedIds) {
+        const sa = annotations.find(a => a.id === sid);
+        if (sa && (sa.type === 'block' || sa.type === 'tetramino')) allChildIds.push(...findOverlapping(sa));
+      }
+      dragging = { id: hit.id, ids: [...selectedIds], originX: w.x, originY: w.y, totalDx: 0, totalDy: 0, childIds: allChildIds };
+      touchState.mode = 'drag';
+    } else {
+      selectedIds.clear();
+    }
+    render();
+    return;
+  }
+  if (myTool === 'Text') {
+    textInputEl.style.display = 'block';
+    textInputEl.style.left = t.clientX + 'px';
+    textInputEl.style.top = t.clientY + 'px';
+    textInputEl.style.color = myColor;
+    textInputEl.value = '';
+    setTimeout(() => textInputEl.focus(), 0);
+    const wx = w.x, wy = w.y;
+    textInputEl.onkeydown = (ev) => {
+      if (ev.key === 'Enter') {
+        const text = textInputEl.value.trim();
+        if (text) {
+          socket.emit('annotation:add', { type: 'text', x: wx, y: wy, text, color: myColor, size: TEXT_SIZE });
+        }
+        textInputEl.style.display = 'none';
+        textInputEl.onkeydown = null;
+      } else if (ev.key === 'Escape') {
+        textInputEl.style.display = 'none';
+        textInputEl.onkeydown = null;
+      }
+    };
+    return;
+  }
+  if (myTool === 'Pen') {
+    drawing = true;
+    currentStroke = { type: 'pen', points: [{ x: w.x, y: w.y }], color: myColor, size: mySize };
+    return;
+  }
+  if (myTool === 'Block') {
+    drawing = true;
+    const sx = Math.round(w.x / CELL) * CELL - Math.round(CELL / 2), sy = Math.round(w.y / CELL) * CELL - Math.round(CELL / 2);
+    currentStroke = { type: 'block', x1: sx, y1: sy, x2: sx + CELL, y2: sy + CELL, color: myColor, size: mySize };
+    return;
+  }
+  if (myTool === 'Tetramino') {
+    drawing = true;
+    const ox = Math.round(w.x / CELL) * CELL - Math.round(CELL / 2), oy = Math.round(w.y / CELL) * CELL - Math.round(CELL / 2);
+    currentStroke = { type: 'tetramino', x: ox, y: oy, cells: [{ ix: 0, iy: 0 }], color: myColor, size: mySize };
+    return;
+  }
+  if (myTool === 'Signal') {
+    socket.emit('annotation:add', { type: 'signal', x: w.x, y: w.y, on: true, color: myColor, size: mySize });
+    return;
+  }
+  drawing = true;
+  currentStroke = { type: myTool.toLowerCase(), x1: w.x, y1: w.y, x2: w.x, y2: w.y, color: myColor, size: mySize };
+}, { passive: false });
+
+canvas.addEventListener('touchmove', (e) => {
+  e.preventDefault();
+  if (e.touches.length === 2) {
+    touchState.mode = 'gesture';
+    const t = e.touches;
+    const dist = Math.hypot(t[1].clientX - t[0].clientX, t[1].clientY - t[0].clientY);
+    const mid = { x: (t[0].clientX + t[1].clientX) / 2, y: (t[0].clientY + t[1].clientY) / 2 };
+    // Pinch zoom
+    const oldZoom = cam.zoom;
+    cam.zoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, cam.zoom * (dist / touchState.lastDist)));
+    cam.x = mid.x - (mid.x - cam.x) * (cam.zoom / oldZoom);
+    cam.y = mid.y - (mid.y - cam.y) * (cam.zoom / oldZoom);
+    // Pan
+    if (touchState.lastMid) {
+      cam.x += mid.x - touchState.lastMid.x;
+      cam.y += mid.y - touchState.lastMid.y;
+    }
+    touchState.lastDist = dist;
+    touchState.lastMid = mid;
+    emitViewport();
+    render();
+    return;
+  }
+  if (e.touches.length === 1 && touchState.mode === 'drag' && dragging) {
+    const t = e.touches[0];
+    const w = screenToWorld(t.clientX, t.clientY);
+    dragging.totalDx = w.x - dragging.originX;
+    dragging.totalDy = w.y - dragging.originY;
+    if (!dragSendTimer) {
+      dragSendTimer = setTimeout(() => {
+        dragSendTimer = null;
+        for (const did of (dragging.ids || [dragging.id])) {
+          socket.emit('annotation:dragging', { id: did, dx: dragging.totalDx, dy: dragging.totalDy, childIds: dragging.childIds });
+        }
+      }, DRAG_THROTTLE);
+    }
+    render();
+    return;
+  }
+  if (e.touches.length !== 1 || touchState.mode !== 'draw' || !drawing) return;
+  const t = e.touches[0];
+  const w = screenToWorld(t.clientX, t.clientY);
+  if (currentStroke.type === 'pen') {
+    currentStroke.points.push({ x: w.x, y: w.y });
+  } else if (currentStroke.type === 'block') {
+    const sx = currentStroke.x1, sy = currentStroke.y1;
+    const half = Math.round(CELL / 2);
+    let ex = Math.round(w.x / CELL) * CELL - half + CELL, ey = Math.round(w.y / CELL) * CELL - half + CELL;
+    if (ex <= sx) ex = sx + CELL;
+    if (ey <= sy) ey = sy + CELL;
+    currentStroke.x2 = ex;
+    currentStroke.y2 = ey;
+  } else if (currentStroke.type === 'tetramino') {
+    updateTetraminoCells(currentStroke, w);
+  } else {
+    currentStroke.x2 = w.x;
+    currentStroke.y2 = w.y;
+  }
+  render();
+}, { passive: false });
+
+canvas.addEventListener('touchend', (e) => {
+  e.preventDefault();
+  if (e.touches.length > 0) return;
+  if (touchState.mode === 'drag' && dragging) {
+    if (dragSendTimer) { clearTimeout(dragSendTimer); dragSendTimer = null; }
+    if (dragging.totalDx || dragging.totalDy) {
+      for (const did of (dragging.ids || [dragging.id])) {
+        socket.emit('annotation:move', { id: did, dx: dragging.totalDx, dy: dragging.totalDy });
+      }
+      for (const cid of dragging.childIds) socket.emit('annotation:move', { id: cid, dx: dragging.totalDx, dy: dragging.totalDy });
+    } else {
+      const a = annotations.find(a => a.id === dragging.id);
+      if (a && a.type === 'signal') socket.emit('annotation:toggle', a.id);
+    }
+    for (const did of (dragging.ids || [dragging.id])) delete dragOffsets[did];
+    dragging = null;
+    touchState.mode = null;
+    return;
+  }
+  if (touchState.mode === 'draw' && drawing) {
+    drawing = false;
+    if (currentStroke && !(currentStroke.type === 'pen' && currentStroke.points.length < 2)) {
+      socket.emit('annotation:add', currentStroke);
+    }
+    currentStroke = null;
+    render();
+  }
+  touchState.mode = null;
+}, { passive: false });
+
+function pointInContainer(a, px, py) {
+  if (a.type === 'block') return px >= a.x1 && px <= a.x2 && py >= a.y1 && py <= a.y2;
+  if (a.type === 'tetramino' && a.cells) return a.cells.some(c => { const cx = a.x + c.ix * CELL, cy = a.y + c.iy * CELL; return px >= cx && px <= cx + CELL && py >= cy && py <= cy + CELL; });
+  return false;
+}
+
+function findOverlapping(container) {
+  const ids = [];
+  for (const a of annotations) {
+    if (a.id === container.id || a.type === 'block' || a.type === 'tetramino') continue;
+    if (a.type === 'pen' && a.points.some(p => pointInContainer(container, p.x, p.y))) ids.push(a.id);
+    else if (a.type === 'text' && pointInContainer(container, a.x, a.y)) ids.push(a.id);
+  }
+  return ids;
+}
+
+function updateTetraminoCells(stroke, w) {
+  const ix = Math.floor((w.x - stroke.x) / CELL), iy = Math.floor((w.y - stroke.y) / CELL);
+  const cells = stroke.cells;
+  if (cells.some(c => c.ix === ix && c.iy === iy)) return;
+  if (cells.some(c => Math.abs(ix - c.ix) + Math.abs(iy - c.iy) === 1)) {
+    cells.push({ ix, iy });
+  }
+}
+
+function moveAnnotation(a, dx, dy) {
+  if (a.type === 'text' || a.type === 'signal') { a.x += dx; a.y += dy; }
+  else if (a.type === 'pen') { for (const p of a.points) { p.x += dx; p.y += dy; } }
+  else if (a.type === 'tetramino') { a.x += dx; a.y += dy; }
+  else { a.x1 += dx; a.y1 += dy; a.x2 += dx; a.y2 += dy; }
+}
+
+function getTextBounds(a) {
+  ctx.save();
+  ctx.font = `${a.size || FONT_FALLBACK}px sans-serif`;
+  const m = ctx.measureText(a.text);
+  ctx.restore();
+  const h = a.size || FONT_FALLBACK;
+  return { x: a.x, y: a.y - h, w: m.width, h: h * 1.3 };
+}
+
+function pointToRectDist(px, py, rx, ry, rw, rh) {
+  const cx = Math.max(rx, Math.min(px, rx + rw));
+  const cy = Math.max(ry, Math.min(py, ry + rh));
+  return Math.hypot(px - cx, py - cy);
+}
+
+function findNearestAnnotation(wx, wy, threshold) {
+  let best = null, bestDist = threshold;
+  for (const a of annotations) {
+    let dist = Infinity;
+    if (a.type === 'pen') {
+      for (const p of a.points) {
+        const d = Math.hypot(p.x - wx, p.y - wy);
+        if (d < dist) dist = d;
+      }
+    } else if (a.type === 'text') {
+      const b = getTextBounds(a);
+      dist = pointToRectDist(wx, wy, b.x, b.y, b.w, b.h);
+    } else if (a.type === 'tetramino') {
+      for (const c of a.cells) {
+        const d = pointToRectDist(wx, wy, a.x + c.ix * CELL, a.y + c.iy * CELL, CELL, CELL);
+        if (d < dist) dist = d;
+      }
+    } else if (a.type === 'signal') {
+      dist = Math.max(0, Math.hypot(a.x - wx, a.y - wy) - SIGNAL_RADIUS);
+    } else {
+      const x = Math.min(a.x1, a.x2), y = Math.min(a.y1, a.y2);
+      const w = Math.abs(a.x2 - a.x1), h = Math.abs(a.y2 - a.y1);
+      dist = pointToRectDist(wx, wy, x, y, w, h);
+    }
+    if (dist < bestDist) { bestDist = dist; best = a; }
+  }
+  return best;
+}
+
+// Rendering
+function render() {
+  clampCam();
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.save();
+  ctx.translate(cam.x, cam.y);
+  ctx.scale(cam.zoom, cam.zoom);
+
+  if (imgLoaded) ctx.drawImage(img, 0, 0);
+
+  const dragOffsetById = {};
+  if (dragging) {
+    for (const did of (dragging.ids || [dragging.id])) dragOffsetById[did] = dragging;
+    if (dragging.childIds) for (const cid of dragging.childIds) dragOffsetById[cid] = dragging;
+  }
+  for (const id in dragOffsets) {
+    const off = dragOffsets[id];
+    dragOffsetById[id] = off;
+    if (off.childIds) for (const cid of off.childIds) dragOffsetById[cid] = off;
+  }
+  for (const a of annotations) {
+    const off = dragOffsetById[a.id];
+    if (off) { ctx.save(); ctx.translate(off.totalDx, off.totalDy); }
+    try { drawAnnotation(a); } catch(e) { console.error('[draw]', a.type, a.id, e); }
+    if (a.id === highlightedId || selectedIds.has(a.id)) drawHighlight(a);
+    if (off) ctx.restore();
+  }
+  if (currentStroke) drawAnnotation(currentStroke);
+
+  ctx.restore();
+
+  // Draw remote viewports
+  for (const id in remotePlayers) {
+    const p = remotePlayers[id];
+    if (!p.viewport) continue;
+    const tl = worldToScreen(p.viewport.x, p.viewport.y);
+    const br = worldToScreen(p.viewport.x + p.viewport.w, p.viewport.y + p.viewport.h);
+    ctx.globalAlpha = 0.75;
+    ctx.strokeStyle = p.color || '#888';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([6, 4]);
+    ctx.strokeRect(tl.x, tl.y, br.x - tl.x, br.y - tl.y);
+    ctx.setLineDash([]);
+    ctx.fillStyle = p.color || '#888';
+    ctx.font = '12px sans-serif';
+    ctx.fillText(p.name || 'Player', tl.x + 4, tl.y - 4);
+    ctx.globalAlpha = 1;
+  }
+
+  // Draw remote cursors
+  const cw = canvas.width, ch = canvas.height;
+  for (const id in remotePlayers) {
+    const p = remotePlayers[id];
+    if (!p.cursor) continue;
+    const s = worldToScreen(p.cursor.x, p.cursor.y);
+    const color = p.color || '#888';
+    const onScreen = s.x >= 0 && s.x <= cw && s.y >= 0 && s.y <= ch;
+    if (onScreen) {
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, 4, 0, Math.PI * 2);
+      ctx.fillStyle = color;
+      ctx.fill();
+      ctx.font = '11px sans-serif';
+      ctx.fillStyle = color;
+      ctx.fillText(p.name || 'Player', s.x + 8, s.y - 4);
+    } else {
+      const marginX = 20, marginTop = 55, marginBottom = 20;
+      const angle = Math.atan2(s.y - ch / 2, s.x - cw / 2);
+      let ex = Math.max(marginX, Math.min(cw - marginX, s.x));
+      let ey = Math.max(marginTop, Math.min(ch - marginBottom, s.y));
+      if (s.x < marginX) ex = marginX;
+      else if (s.x > cw - marginX) ex = cw - marginX;
+      if (s.y < marginTop) ey = marginTop;
+      else if (s.y > ch - marginBottom) ey = ch - marginBottom;
+      ctx.save();
+      ctx.translate(ex, ey);
+      ctx.rotate(angle);
+      ctx.beginPath();
+      ctx.moveTo(8, 0);
+      ctx.lineTo(-4, -5);
+      ctx.lineTo(-4, 5);
+      ctx.closePath();
+      ctx.fillStyle = color;
+      ctx.fill();
+      ctx.restore();
+      ctx.font = '10px sans-serif';
+      ctx.fillStyle = color;
+      ctx.fillText(p.name || 'Player', ex + 10, ey - 6);
+    }
+  }
+}
+
+function drawAnnotation(a) {
+  ctx.strokeStyle = a.color;
+  ctx.fillStyle = a.color;
+  ctx.lineWidth = a.size || 3;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+
+  if (a.type === 'pen' && a.points.length > 1) {
+    ctx.beginPath();
+    ctx.moveTo(a.points[0].x, a.points[0].y);
+    for (let i = 1; i < a.points.length; i++) ctx.lineTo(a.points[i].x, a.points[i].y);
+    ctx.stroke();
+  } else if (a.type === 'text') {
+    ctx.font = `${a.size || FONT_FALLBACK}px sans-serif`;
+    ctx.fillText(a.text, a.x, a.y);
+  } else if (a.type === 'arrow') {
+    ctx.beginPath();
+    ctx.moveTo(a.x1, a.y1);
+    ctx.lineTo(a.x2, a.y2);
+    ctx.stroke();
+    const angle = Math.atan2(a.y2 - a.y1, a.x2 - a.x1);
+    const headLen = 15 + a.size * 2;
+    ctx.beginPath();
+    ctx.moveTo(a.x2, a.y2);
+    ctx.lineTo(a.x2 - headLen * Math.cos(angle - 0.4), a.y2 - headLen * Math.sin(angle - 0.4));
+    ctx.moveTo(a.x2, a.y2);
+    ctx.lineTo(a.x2 - headLen * Math.cos(angle + 0.4), a.y2 - headLen * Math.sin(angle + 0.4));
+    ctx.stroke();
+  } else if (a.type === 'circle') {
+    const rx = Math.abs(a.x2 - a.x1) / 2, ry = Math.abs(a.y2 - a.y1) / 2;
+    const cx = (a.x1 + a.x2) / 2, cy = (a.y1 + a.y2) / 2;
+    ctx.beginPath();
+    ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+    ctx.stroke();
+  } else if (a.type === 'rect') {
+    ctx.strokeRect(a.x1, a.y1, a.x2 - a.x1, a.y2 - a.y1);
+  } else if (a.type === 'block') {
+    const w = a.x2 - a.x1, h = a.y2 - a.y1;
+    ctx.globalAlpha = FILL_ALPHA;
+    ctx.beginPath();
+    ctx.roundRect(a.x1, a.y1, w, h, CORNER_RADIUS);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.lineWidth = OUTLINE_WIDTH;
+    ctx.beginPath();
+    ctx.roundRect(a.x1, a.y1, w, h, CORNER_RADIUS);
+    ctx.stroke();
+  } else if (a.type === 'tetramino' && a.cells && a.cells.length) {
+    const S = CELL;
+    const idxSet = new Set(a.cells.map(c => c.ix + ',' + c.iy));
+    ctx.globalAlpha = FILL_ALPHA;
+    for (const c of a.cells) {
+      ctx.fillRect(a.x + c.ix * S, a.y + c.iy * S, S, S);
+    }
+    ctx.globalAlpha = 1;
+    ctx.lineWidth = OUTLINE_WIDTH;
+    for (const c of a.cells) {
+      const x = a.x + c.ix * S, y = a.y + c.iy * S;
+      if (!idxSet.has(c.ix + ',' + (c.iy - 1))) { ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + S, y); ctx.stroke(); }
+      if (!idxSet.has(c.ix + ',' + (c.iy + 1))) { ctx.beginPath(); ctx.moveTo(x, y + S); ctx.lineTo(x + S, y + S); ctx.stroke(); }
+      if (!idxSet.has((c.ix - 1) + ',' + c.iy)) { ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x, y + S); ctx.stroke(); }
+      if (!idxSet.has((c.ix + 1) + ',' + c.iy)) { ctx.beginPath(); ctx.moveTo(x + S, y); ctx.lineTo(x + S, y + S); ctx.stroke(); }
+    }
+  } else if (a.type === 'signal') {
+    const r = SIGNAL_RADIUS;
+    if (a.on) {
+      ctx.save();
+      ctx.shadowColor = '#fffbe6';
+      ctx.shadowBlur = r * 1.5;
+      ctx.beginPath();
+      ctx.arc(a.x, a.y, r, 0, Math.PI * 2);
+      ctx.lineWidth = 5;
+      ctx.strokeStyle = '#fffbe6';
+      ctx.stroke();
+      ctx.globalAlpha = 0.15;
+      ctx.fillStyle = '#fffbe6';
+      ctx.fill();
+      ctx.restore();
+    } else {
+      ctx.beginPath();
+      ctx.arc(a.x, a.y, r, 0, Math.PI * 2);
+      ctx.lineWidth = 5;
+      ctx.strokeStyle = '#111';
+      ctx.stroke();
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = '#888';
+      ctx.stroke();
+    }
+  }
+}
+
+function drawHighlight(a) {
+  ctx.save();
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth = (a.size || 3) + 6;
+  ctx.globalAlpha = 0.4;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.setLineDash([8, 6]);
+  if (a.type === 'pen' && a.points.length > 1) {
+    ctx.beginPath();
+    ctx.moveTo(a.points[0].x, a.points[0].y);
+    for (let i = 1; i < a.points.length; i++) ctx.lineTo(a.points[i].x, a.points[i].y);
+    ctx.stroke();
+  } else if (a.type === 'text') {
+    ctx.font = `${a.size || FONT_FALLBACK}px sans-serif`;
+    const m = ctx.measureText(a.text);
+    ctx.strokeRect(a.x - 4, a.y - (a.size || FONT_FALLBACK) - 2, m.width + 8, (a.size || FONT_FALLBACK) + 8);
+  } else if (a.type === 'arrow') {
+    ctx.beginPath();
+    ctx.moveTo(a.x1, a.y1);
+    ctx.lineTo(a.x2, a.y2);
+    ctx.stroke();
+  } else if (a.type === 'circle') {
+    const rx = Math.abs(a.x2 - a.x1) / 2, ry = Math.abs(a.y2 - a.y1) / 2;
+    ctx.beginPath();
+    ctx.ellipse((a.x1 + a.x2) / 2, (a.y1 + a.y2) / 2, rx + 4, ry + 4, 0, 0, Math.PI * 2);
+    ctx.stroke();
+  } else if (a.type === 'rect' || a.type === 'block') {
+    ctx.strokeRect(a.x1 - 4, a.y1 - 4, a.x2 - a.x1 + 8, a.y2 - a.y1 + 8);
+  } else if (a.type === 'tetramino') {
+    for (const c of a.cells) {
+      ctx.strokeRect(a.x + c.ix * CELL - 3, a.y + c.iy * CELL - 3, CELL + 6, CELL + 6);
+    }
+  } else if (a.type === 'signal') {
+    ctx.beginPath();
+    ctx.arc(a.x, a.y, SIGNAL_RADIUS + 4, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+// Cursor sync
+let cursorTimer = null;
+function emitCursor(wx, wy) {
+  if (cursorTimer) return;
+  cursorTimer = setTimeout(() => { cursorTimer = null; }, CURSOR_THROTTLE);
+  socket.emit('cursor:update', { x: wx, y: wy });
+}
+
+// Viewport sync
+let viewportTimer = null;
+function emitViewport() {
+  if (viewportTimer) return;
+  viewportTimer = setTimeout(() => {
+    viewportTimer = null;
+    const w = screenToWorld(0, 0);
+    const br = screenToWorld(canvas.width, canvas.height);
+    socket.emit('viewport:update', { x: w.x, y: w.y, w: br.x - w.x, h: br.y - w.y });
+    localStorage.setItem('cam', JSON.stringify(cam));
+  }, VIEWPORT_THROTTLE);
+}
+
+// Socket events
+socket.on('connect', () => {
+  socket.emit('player:join', { name: myName, color: myColor });
+  emitViewport();
+});
+
+socket.on('state:sync', (data) => {
+  annotations = data.annotations || [];
+  console.log('[sync]', annotations.length, 'annotations', annotations.filter(a => a.type === 'tetramino').length, 'tetraminoes');
+  for (const id in data.players) {
+    if (id !== socket.id) remotePlayers[id] = data.players[id];
+  }
+  updatePlayerList();
+  render();
+});
+
+socket.on('annotation:add', (a) => { annotations.push(a); render(); });
+socket.on('annotation:remove', (id) => { annotations = annotations.filter(a => a.id !== id); render(); });
+socket.on('annotation:toggle', (id) => { const a = annotations.find(a => a.id === id); if (a) { a.on = !a.on; render(); } });
+socket.on('annotation:dragging', ({ id, dx, dy, childIds }) => {
+  dragOffsets[id] = { totalDx: dx, totalDy: dy, childIds };
+  render();
+});
+socket.on('annotation:move', ({ id, dx, dy }) => {
+  delete dragOffsets[id];
+  const a = annotations.find(a => a.id === id);
+  if (a) moveAnnotation(a, dx, dy);
+  render();
+});
+
+socket.on('player:update', (p) => {
+  if (p.id !== socket.id) { remotePlayers[p.id] = p; updatePlayerList(); }
+});
+socket.on('player:leave', (id) => { delete remotePlayers[id]; updatePlayerList(); render(); });
+socket.on('viewport:update', (data) => {
+  if (!remotePlayers[data.id]) remotePlayers[data.id] = {};
+  remotePlayers[data.id].viewport = data.viewport;
+  remotePlayers[data.id].name = data.name;
+  remotePlayers[data.id].color = data.color;
+  render();
+});
+socket.on('cursor:update', (data) => {
+  if (!remotePlayers[data.id]) remotePlayers[data.id] = {};
+  remotePlayers[data.id].cursor = data.cursor;
+  remotePlayers[data.id].name = data.name;
+  remotePlayers[data.id].color = data.color;
+  render();
+});
+
+let initialVersion = null;
+async function checkVersion() {
+  try {
+    const sid = socket.id || '';
+    const res = await fetch('/version?sid=' + sid);
+    const { version } = await res.json();
+    if (!initialVersion) {
+      initialVersion = version;
+      document.getElementById('versionLabel').textContent = 'v' + version;
+      return;
+    }
+    if (version !== initialVersion) {
+      const b = document.getElementById('versionBanner');
+      b.textContent = `v${initialVersion} → v${version} · click to reload`;
+      b.style.display = 'block';
+      document.getElementById('versionLabel').style.display = 'none';
+    }
+  } catch {}
+}
+checkVersion();
+setInterval(checkVersion, 5000);
+
+function updatePlayerList() {
+  playersEl.innerHTML = '';
+  const self = document.createElement('div');
+  self.className = 'player-tag';
+  self.style.borderColor = myColor;
+  self.style.color = myColor;
+  self.textContent = (myName || 'Player') + ' (you)';
+  playersEl.appendChild(self);
+  for (const id in remotePlayers) {
+    const p = remotePlayers[id];
+    const tag = document.createElement('div');
+    tag.className = 'player-tag';
+    tag.style.borderColor = p.color || '#888';
+    tag.style.color = p.color || '#888';
+    tag.textContent = p.name || 'Player';
+    playersEl.appendChild(tag);
+  }
+}
+</script>
+</body>
+</html>
